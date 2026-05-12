@@ -1,27 +1,10 @@
-// rungroup provides a minimal, zero-dependency mechanism for managing
-// the lifecycle of concurrent background services.
+// rungroup manages the lifecycle of concurrent background services.
 //
-// Why not errgroup or WaitGroup?
+// Services are supervised independently: panics are recovered, errors are
+// aggregated, and each service carries its own restart policy and backoff.
 //
-// [x/sync/errgroup] cancels the whole group on the first error and does not
-// restart services. A raw [sync.WaitGroup] provides no error aggregation,
-// panic recovery, or restart logic. This package fills that gap: services are
-// supervised independently, panics are caught and converted to errors, and
-// each service carries its own restart policy and backoff strategy.
-//
-// Nested rungroups:
-//
-// A [*Group] satisfies the [Service] interface. Add one rungroup to
-// another to build a two-level hierarchy. By default, [ErrShutdownAll]
-// propagates upward through the tree. Use [WithIsolateShutdown] on the
-// child-as-service to absorb the signal at that boundary instead.
-//
-// Performance:
-//
-// One goroutine is allocated per registered service. There are no internal
-// goroutine pools or background housekeeping goroutines beyond those spawned
-// directly by [Group.Run]. Allocations beyond the per-service goroutine
-// stack are limited to error values on non-happy paths.
+// A [*Group] satisfies [Service], so rungroups can be nested. [ErrShutdownAll]
+// propagates to the parent by default; use [WithIsolateShutdown] to absorb it.
 package rungroup
 
 import (
