@@ -367,9 +367,11 @@ func TestRun_GlobalShutdownTimeoutReturnsError(t *testing.T) {
 func TestRun_PerServiceShutdownTimeout_OnlyAffectsHungService(t *testing.T) {
 	s := rungroup.New()
 	hungStarted := make(chan struct{})
+	cleanStarted := make(chan struct{})
 	cleanStopped := make(chan struct{})
 
 	s.Add(rungroup.ServiceFunc(func(ctx context.Context) error {
+		close(cleanStarted)
 		<-ctx.Done()
 		close(cleanStopped)
 		return nil
@@ -389,6 +391,7 @@ func TestRun_PerServiceShutdownTimeout_OnlyAffectsHungService(t *testing.T) {
 	go func() { errCh <- s.Run(ctx) }()
 
 	<-hungStarted
+	<-cleanStarted
 	cancel()
 
 	select {
