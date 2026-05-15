@@ -1,5 +1,7 @@
 # RunGroup
 
+[![Go Report Card](https://goreportcard.com/badge/lowbit.dev/rungroup)](https://goreportcard.com/report/lowbit.dev/rungroup) [![Go Reference](https://pkg.go.dev/badge/lowbit.dev/rungroup.svg)](https://pkg.go.dev/lowbit.dev/rungroup) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 RunGroup is a concurrency primitive for managing long-lived background services in Go. It supervises goroutines independently, handling restarts, panic recovery, backoff, and clean shutdown. It blocks until all services have exited before returning a joined aggregate of any errors.
 
 - **Restart policies** — always, on failure, or never; configured per service
@@ -16,8 +18,6 @@ RunGroup is a concurrency primitive for managing long-lived background services 
 ```sh
 go get lowbit.dev/rungroup
 ```
-
-Requires Go 1.20+.
 
 ## Usage
 
