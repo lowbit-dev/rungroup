@@ -417,29 +417,21 @@ func (s *Group) runServiceLoop(ctx context.Context, shutdownAll context.CancelFu
 		start := time.Now()
 		err := s.executeWithRecovery(ctx, m.svc)
 
-		// The service may have exited because the rungroup is shutting down.
-		// In that case there is nothing to evaluate — return cleanly regardless
-		// of what err contains.
 		if ctx.Err() != nil {
 			return nil
 		}
 
-		// If the service ran stably for the full stability window, reset the
-		// attempt counter so a long-running service isn't penalised with a
-		// large backoff delay after an eventual crash.
 		if m.stabilityWindow > 0 && time.Since(start) >= m.stabilityWindow {
 			attempt = 0
 		}
 
 		if errors.Is(err, ErrShutdownAll) {
 			if m.isolateShutdown {
-				// Absorb the signal at this boundary. Wrap the cause as a plain
-				// string so ErrShutdownAll does not appear in the parent's error
-				// chain via errors.Is.
 				termErr := fmt.Errorf("%w: service %q exited: %s", ErrPolicyHalt, m.name, err.Error())
 				s.emitEvent(m, Event{Type: EventServiceHalted, ServiceName: m.name, Err: termErr})
 				return termErr
 			}
+
 			shutdownAll()
 			termErr := fmt.Errorf("service %q triggered rungroup shutdown: %w", m.name, err)
 			s.emitEvent(m, Event{Type: EventServiceHalted, ServiceName: m.name, Err: termErr})
@@ -458,17 +450,15 @@ func (s *Group) runServiceLoop(ctx context.Context, shutdownAll context.CancelFu
 				s.emitEvent(m, Event{Type: EventServiceHalted, ServiceName: m.name, Err: termErr})
 				return termErr
 			}
-			// Clean exit with no restart — emit halted with no error.
+
 			s.emitEvent(m, Event{Type: EventServiceHalted, ServiceName: m.name})
 			return nil
 		}
 
-		// The service will be restarted. Fire the event before the backoff wait.
 		attempt++
 		delay := m.backoff(attempt)
 
 		if delay < 0 {
-			// A negative delay signals the backoff strategy has given up.
 			var termErr error
 			if err != nil {
 				termErr = fmt.Errorf("%w: service %q (attempt %d): %w", ErrRestartLimitExceeded, m.name, attempt, err)
