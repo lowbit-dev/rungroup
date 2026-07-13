@@ -4,7 +4,7 @@
 // aggregated, and each service carries its own restart policy and backoff.
 //
 // A [*Group] satisfies [Service], so rungroups can be nested. [ErrShutdownAll]
-// propagates to the parent by default; use [WithIsolateShutdown] to absorb it.
+// propagates to the parent by default; use [WithShutdownIsolation] to absorb it.
 package rungroup
 
 import (
@@ -55,7 +55,7 @@ var (
 	// an application-wide failure state that makes continued operation impossible.
 	//
 	// When used in a nested rungroup, the shutdown signal propagates to the
-	// parent by default. Use [WithIsolateShutdown] on the child rungroup's
+	// parent by default. Use [WithShutdownIsolation] on the child rungroup's
 	// service entry to absorb the signal at that boundary.
 	ErrShutdownAll = errors.New("shutdown all services")
 )
@@ -196,11 +196,11 @@ func WithServiceShutdownTimeout(d time.Duration) Option {
 	}
 }
 
-// WithIsolateShutdown prevents [ErrShutdownAll] from propagating to the parent
+// WithShutdownIsolation prevents [ErrShutdownAll] from propagating to the parent
 // rungroup when this service (typically a nested [*Group]) triggers one.
 // The shutdown is absorbed at this service boundary and treated as a normal
 // policy halt.
-func WithIsolateShutdown() Option {
+func WithShutdownIsolation() Option {
 	return func(m *managedService) {
 		m.isolateShutdown = true
 	}
@@ -237,6 +237,20 @@ func WithEventHandler(fn func(Event)) GroupOption {
 	}
 }
 
+// WithShutdownBoundary prevents [ErrShutdownAll] from propagating to a parent
+// rungroup when a service inside this group triggers one. The shutdown is
+// absorbed at this group's boundary: the group shuts itself down normally but
+// returns an error wrapping [ErrPolicyHalt] rather than [ErrShutdownAll].
+//
+// This is the group-level counterpart to [WithShutdownIsolation]. Prefer this
+// when you own the group definition; use [WithShutdownIsolation] when you are
+// registering a third-party or pre-built group into a parent.
+func WithShutdownBoundary() GroupOption {
+	return func(s *Group) {
+		s.isShutdownBoundary = true
+	}
+}
+
 // Group manages a group of concurrent services.
 type Group struct {
 	// TODO(introspection): Add a Status() method to expose active service names,
@@ -244,6 +258,7 @@ type Group struct {
 	services           []managedService
 	running            atomic.Bool
 	shutdownTimeout    time.Duration
+	isShutdownBoundary bool
 	serviceNameCounter atomic.Int64
 	onEvent            func(Event)
 
@@ -330,6 +345,15 @@ func (s *Group) Run(ctx context.Context) error {
 	s.mu.Lock()
 	errs := s.termErrs
 	s.mu.Unlock()
+
+	if s.isShutdownBoundary {
+		for i, e := range errs {
+			if errors.Is(e, ErrShutdownAll) {
+				errs[i] = fmt.Errorf("%w: %s", ErrPolicyHalt, e.Error())
+			}
+		}
+	}
+
 	return errors.Join(errs...)
 }
 

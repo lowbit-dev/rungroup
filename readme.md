@@ -1,6 +1,6 @@
 # RunGroup
 
-[![Go Report Card](https://goreportcard.com/badge/lowbit.dev/rungroup)](https://goreportcard.com/report/lowbit.dev/rungroup) [![Go Reference](https://pkg.go.dev/badge/lowbit.dev/rungroup.svg)](https://pkg.go.dev/lowbit.dev/rungroup) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Go Report Card](https://goreportcard.com/badge/lowbit.dev/rungroup)](https://goreportcard.com/report/lowbit.dev/rungroup) [![Go Reference](https://pkg.go.dev/badge/lowbit.dev/rungroup.svg)](https://pkg.go.dev/lowbit.dev/rungroup) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE) 
 
 RunGroup is a concurrency primitive for managing long-lived background services in Go. It supervises goroutines independently, handling restarts, panic recovery, backoff, and clean shutdown. It blocks until all services have exited before returning a joined aggregate of any errors.
 
@@ -71,12 +71,19 @@ Per-service and global timeouts race; whichever fires first wins. Exceeded servi
 
 ## Nested Groups
 
-`*Group` implements `Service`. Add a group to another to build a supervision tree. By default `ErrShutdownAll` propagates upward; use `WithIsolateShutdown` to absorb it at a boundary.
+`*Group` implements `Service`. Add a group to another to build a supervision tree. By default `ErrShutdownAll` propagates upward; there are two ways to absorb it at a boundary:
+
+- **`WithShutdownBoundary()`** — set on the group itself at construction time. Prefer this when you own the group definition.
+- **`WithShutdownIsolation()`** — set on the service entry when registering the group into a parent. Use this when you do not own the group.
 
 ```go
+// Option A: boundary declared on the group
+inner := rungroup.New(rungroup.WithShutdownBoundary())
+
+// Option B: isolation declared at the registration site
 outer.Add(inner,
     rungroup.WithName("inner-group"),
-    rungroup.WithIsolateShutdown(),
+    rungroup.WithShutdownIsolation(),
 )
 ```
 
@@ -107,9 +114,9 @@ g.Add(
 
 ## Options
 
-**Service** — `WithName`, `WithRestartPolicy`, `WithBackoff`, `WithStabilityWindow`, `WithServiceShutdownTimeout`, `WithIsolateShutdown`, `WithServiceEventHandler`
+**Service** — `WithName`, `WithRestartPolicy`, `WithBackoff`, `WithStabilityWindow`, `WithServiceShutdownTimeout`, `WithShutdownIsolation`, `WithServiceEventHandler`
 
-**Group** — `WithShutdownTimeout`, `WithEventHandler`
+**Group** — `WithShutdownTimeout`, `WithEventHandler`, `WithShutdownBoundary`
 
 ## License
 

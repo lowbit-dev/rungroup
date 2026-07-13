@@ -433,9 +433,9 @@ func ExampleWithServiceShutdownTimeout() {
 	// true
 }
 
-// ExampleWithIsolateShutdown shows that ErrShutdownAll from a nested Group is
+// ExampleWithShutdownIsolation shows that ErrShutdownAll from a nested Group is
 // absorbed at the service boundary; the parent only sees ErrPolicyHalt.
-func ExampleWithIsolateShutdown() {
+func ExampleWithShutdownIsolation() {
 	inner := rungroup.New()
 	inner.Add(
 		rungroup.ServiceFunc(func(_ context.Context) error {
@@ -447,7 +447,7 @@ func ExampleWithIsolateShutdown() {
 	outer := rungroup.New()
 	outer.Add(inner,
 		rungroup.WithName("inner"),
-		rungroup.WithIsolateShutdown(),
+		rungroup.WithShutdownIsolation(),
 	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)

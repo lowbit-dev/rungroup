@@ -700,7 +700,7 @@ func TestNestedSupervisor_ErrShutdownAll_PropagatesToParentByDefault(t *testing.
 	}
 }
 
-func TestNestedSupervisor_WithIsolateShutdown_AbsorbsErrShutdownAll(t *testing.T) {
+func TestNestedSupervisor_WithShutdownIsolation_AbsorbsErrShutdownAll(t *testing.T) {
 	child := rungroup.New()
 	child.Add(
 		rungroup.ServiceFunc(func(_ context.Context) error {
@@ -714,7 +714,7 @@ func TestNestedSupervisor_WithIsolateShutdown_AbsorbsErrShutdownAll(t *testing.T
 	parent.Add(child,
 		rungroup.WithName("child-supervisor"),
 		rungroup.WithRestartPolicy(rungroup.RestartNever),
-		rungroup.WithIsolateShutdown(),
+		rungroup.WithShutdownIsolation(),
 	)
 	parent.Add(rungroup.ServiceFunc(func(ctx context.Context) error {
 		<-ctx.Done()
@@ -738,7 +738,7 @@ func TestNestedSupervisor_WithIsolateShutdown_AbsorbsErrShutdownAll(t *testing.T
 	select {
 	case err := <-parentStopped:
 		if errors.Is(err, rungroup.ErrShutdownAll) {
-			t.Fatalf("ErrShutdownAll leaked into parent despite WithIsolateShutdown: %v", err)
+			t.Fatalf("ErrShutdownAll leaked into parent despite WithShutdownIsolation: %v", err)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("parent did not stop after context cancellation")
