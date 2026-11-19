@@ -208,6 +208,7 @@ func TestRun_ErrDoNotRestart_HaltsServiceRegardlessOfPolicy(t *testing.T) {
 }
 
 func TestRun_ErrShutdownAll_StopsAllServicesAndSurfacesError(t *testing.T) {
+	var secondStarted atomic.Bool
 	secondStopped := make(chan struct{})
 
 	s := rungroup.New()
@@ -220,6 +221,7 @@ func TestRun_ErrShutdownAll_StopsAllServicesAndSurfacesError(t *testing.T) {
 	)
 	s.Add(
 		rungroup.ServiceFunc(func(ctx context.Context) error {
+			secondStarted.Store(true)
 			<-ctx.Done()
 			close(secondStopped)
 			return nil
@@ -235,6 +237,11 @@ func TestRun_ErrShutdownAll_StopsAllServicesAndSurfacesError(t *testing.T) {
 		t.Fatalf("expected ErrShutdownAll in error chain, got %v", err)
 	}
 
+	// The trigger may shut the group down before the bystander is scheduled;
+	// then it never runs. If it did run, it must have been stopped.
+	if !secondStarted.Load() {
+		return
+	}
 	select {
 	case <-secondStopped:
 	default:
@@ -841,5 +848,102 @@ func TestIntervalService_ContextCancellationReturnsNil(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not return after context cancellation")
+	}
+}
+
+func TestRun_ErrorsDoNotLeakIntoNextRun(t *testing.T) {
+	var runs atomic.Int64
+	g := rungroup.New()
+	_ = g.Add(rungroup.ServiceFunc(func(ctx context.Context) error {
+		if runs.Add(1) == 1 {
+			return rungroup.ErrShutdownAll
+		}
+		<-ctx.Done()
+		return nil
+	}), rungroup.WithName("flaky"))
+
+	if err := g.Run(context.Background()); !errors.Is(err, rungroup.ErrShutdownAll) {
+		t.Fatalf("first run: expected rungroup.ErrShutdownAll, got %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- g.Run(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for runs.Load() < 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("second run did not start the service")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+
+	if err := <-done; err != nil {
+		t.Fatalf("second run: expected nil after a clean shutdown, got %v", err)
+	}
+}
+
+func TestRun_ConcurrentAddIsRaceFree(t *testing.T) {
+	g := rungroup.New()
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan error, 1)
+	go func() { done <- g.Run(ctx) }()
+
+	for i := 0; i < 100; i++ {
+		err := g.Add(rungroup.ServiceFunc(func(ctx context.Context) error {
+			<-ctx.Done()
+			return nil
+		}))
+		if err != nil && !errors.Is(err, rungroup.ErrAlreadyRunning) {
+			t.Fatalf("unexpected Add error: %v", err)
+		}
+	}
+
+	cancel()
+	<-done
+}
+
+func hungService(ctx context.Context) error { select {} }
+
+func TestRun_GlobalShutdownTimeoutCoversAllHungServices(t *testing.T) {
+	g := rungroup.New(rungroup.WithShutdownTimeout(100 * time.Millisecond))
+	_ = g.Add(rungroup.ServiceFunc(hungService), rungroup.WithName("hung-1"))
+	_ = g.Add(rungroup.ServiceFunc(hungService), rungroup.WithName("hung-2"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- g.Run(ctx) }()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if strings.Count(err.Error(), rungroup.ErrShutdownTimeout.Error()) != 2 {
+			t.Fatalf("expected a shutdown timeout for both services, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run hung after the global shutdown timeout")
+	}
+}
+
+func TestRun_ServiceShutdownTimeoutsRunConcurrently(t *testing.T) {
+	g := rungroup.New()
+	for i := 0; i < 3; i++ {
+		_ = g.Add(rungroup.ServiceFunc(hungService), rungroup.WithServiceShutdownTimeout(200*time.Millisecond))
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- g.Run(ctx) }()
+	time.Sleep(20 * time.Millisecond)
+
+	start := time.Now()
+	cancel()
+	<-done
+
+	if took := time.Since(start); took > 450*time.Millisecond {
+		t.Fatalf("three 200ms service timeouts took %v; they should overlap", took)
 	}
 }

@@ -262,8 +262,28 @@ type Group struct {
 	serviceNameCounter atomic.Int64
 	onEvent            func(Event)
 
-	mu       sync.Mutex
-	termErrs []error
+	// mu guards services against concurrent Add and Run.
+	mu sync.Mutex
+}
+
+// terminalErrors collects the terminal errors of a single Run. It is created
+// per Run, so errors never leak into a later Run, not even from a service that
+// outlived its shutdown timeout.
+type terminalErrors struct {
+	mu   sync.Mutex
+	errs []error
+}
+
+func (t *terminalErrors) add(err error) {
+	t.mu.Lock()
+	t.errs = append(t.errs, err)
+	t.mu.Unlock()
+}
+
+func (t *terminalErrors) snapshot() []error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]error(nil), t.errs...)
 }
 
 // New creates a new Group.
@@ -278,6 +298,9 @@ func New(opts ...GroupOption) *Group {
 // Add registers a service to be managed. All services must be added before
 // calling Run. Calling Add after Run has started returns [ErrAlreadyRunning].
 func (s *Group) Add(svc Service, opts ...Option) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if s.running.Load() {
 		return ErrAlreadyRunning
 	}
@@ -307,44 +330,49 @@ func (s *Group) Add(svc Service, opts ...Option) error {
 // individual shutdown timeouts are exceeded).
 //
 // If zero services are registered, Run returns nil immediately.
-// It returns an aggregation of any terminal errors produced by the services.
+// It returns an aggregation of the terminal errors produced by the services
+// during this Run. A Group may be Run again after Run returns.
 func (s *Group) Run(ctx context.Context) error {
+	s.mu.Lock()
 	if !s.running.CompareAndSwap(false, true) {
+		s.mu.Unlock()
 		return ErrAlreadyRunning
 	}
+	services := append([]managedService(nil), s.services...)
+	s.mu.Unlock()
 	defer s.running.Store(false)
 
-	if len(s.services) == 0 {
+	if len(services) == 0 {
 		return nil
 	}
+
+	terminal := &terminalErrors{}
 
 	ctx, shutdownAll := context.WithCancel(ctx)
 	defer shutdownAll()
 
 	// doneChs holds one channel per service, closed when the service goroutine
 	// exits. Used for per-service shutdown timeout tracking.
-	doneChs := make([]chan struct{}, len(s.services))
+	doneChs := make([]chan struct{}, len(services))
 	for i := range doneChs {
 		doneChs[i] = make(chan struct{})
 	}
 
-	for i, ms := range s.services {
+	for i, ms := range services {
 		done := doneChs[i]
 		go func(ms managedService) {
 			defer close(done)
 			if err := s.runServiceLoop(ctx, shutdownAll, ms); err != nil {
-				s.appendTerminalErr(err)
+				terminal.add(err)
 			}
 		}(ms)
 	}
 
 	// Wait for all services, honouring per-service and global timeouts.
 	<-ctx.Done()
-	s.waitForServices(doneChs)
+	s.waitForServices(services, doneChs, terminal)
 
-	s.mu.Lock()
-	errs := s.termErrs
-	s.mu.Unlock()
+	errs := terminal.snapshot()
 
 	if s.isShutdownBoundary {
 		for i, e := range errs {
@@ -358,63 +386,56 @@ func (s *Group) Run(ctx context.Context) error {
 }
 
 // waitForServices waits for each service goroutine to exit after the
-// rungroup context has been cancelled. Per-service shutdown timeouts are
-// checked individually; the global shutdown timeout is the outer deadline.
-func (s *Group) waitForServices(doneChs []chan struct{}) {
-	var globalDeadline <-chan time.Time
+// rungroup context has been cancelled. All timeouts are measured from the
+// start of shutdown, so they run concurrently rather than one after another.
+// The global shutdown timeout is the outer deadline for every service.
+func (s *Group) waitForServices(services []managedService, doneChs []chan struct{}, terminal *terminalErrors) {
+	shutdownStart := time.Now()
+
+	// A context's Done channel stays closed once the deadline passes, so every
+	// remaining service observes the global deadline, not just the first.
+	var globalDeadline <-chan struct{}
 	if s.shutdownTimeout > 0 {
-		t := time.NewTimer(s.shutdownTimeout)
-		defer t.Stop()
-		globalDeadline = t.C
+		gctx, cancel := context.WithDeadline(context.Background(), shutdownStart.Add(s.shutdownTimeout))
+		defer cancel()
+		globalDeadline = gctx.Done()
 	}
 
 	for i, done := range doneChs {
-		ms := s.services[i]
+		ms := services[i]
 
-		// Determine the effective per-service timeout.
-		svcTimeout := ms.shutdownTimeout
-
-		if svcTimeout <= 0 {
-			// No per-service timeout: wait until done or global deadline.
-			select {
-			case <-done:
-			case <-globalDeadline:
-				s.emitEvent(ms, Event{
-					Type:        EventShutdownTimeout,
-					ServiceName: ms.name,
-				})
-				s.appendTerminalErr(fmt.Errorf("%w: service %q", ErrShutdownTimeout, ms.name))
+		var svcDeadline <-chan time.Time
+		var svcTimer *time.Timer
+		if ms.shutdownTimeout > 0 {
+			remaining := time.Until(shutdownStart.Add(ms.shutdownTimeout))
+			if remaining < 0 {
+				remaining = 0
 			}
-			continue
+			svcTimer = time.NewTimer(remaining)
+			svcDeadline = svcTimer.C
 		}
-
-		// Per-service timeout: race it against the global deadline.
-		svcTimer := time.NewTimer(svcTimeout)
-		defer svcTimer.Stop()
 
 		select {
 		case <-done:
-		case <-svcTimer.C:
-			s.emitEvent(ms, Event{
-				Type:        EventShutdownTimeout,
-				ServiceName: ms.name,
-			})
-			s.appendTerminalErr(fmt.Errorf("%w: service %q", ErrShutdownTimeout, ms.name))
+		case <-svcDeadline:
+			s.reportShutdownTimeout(ms, terminal)
 		case <-globalDeadline:
-			s.emitEvent(ms, Event{
-				Type:        EventShutdownTimeout,
-				ServiceName: ms.name,
-			})
-			s.appendTerminalErr(fmt.Errorf("%w: service %q", ErrShutdownTimeout, ms.name))
+			s.reportShutdownTimeout(ms, terminal)
+		}
+
+		if svcTimer != nil {
+			svcTimer.Stop()
 		}
 	}
 }
 
-// appendTerminalErr records a terminal error from a service goroutine.
-func (s *Group) appendTerminalErr(err error) {
-	s.mu.Lock()
-	s.termErrs = append(s.termErrs, err)
-	s.mu.Unlock()
+// reportShutdownTimeout records that ms did not exit in time; its goroutine is abandoned.
+func (s *Group) reportShutdownTimeout(ms managedService, terminal *terminalErrors) {
+	s.emitEvent(ms, Event{
+		Type:        EventShutdownTimeout,
+		ServiceName: ms.name,
+	})
+	terminal.add(fmt.Errorf("%w: service %q", ErrShutdownTimeout, ms.name))
 }
 
 // emitEvent dispatches an event to the service-level handler (if any) and
